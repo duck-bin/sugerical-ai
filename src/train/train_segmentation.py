@@ -24,6 +24,7 @@ from src.data.class_balance import (
     make_weighted_sampler,
 )
 from src.data.transforms import build_eval_transforms, build_train_transforms
+from src.models.sam2_lora import SAM2LoRASegmenter
 from src.models.unet_baseline import UNetBaseline
 from src.train.lightning_modules import SegmentationModule
 from src.utils.seeds import seed_everything
@@ -39,7 +40,15 @@ def build_model(model_cfg: DictConfig):
             num_classes=model_cfg.num_classes,
         )
     if name == "sam2_lora":
-        raise NotImplementedError("SAM2 + LoRA model is implemented in Step 5.")
+        return SAM2LoRASegmenter(
+            base_checkpoint=model_cfg.base_checkpoint,
+            num_classes=model_cfg.num_classes,
+            lora_rank=model_cfg.lora.rank,
+            lora_alpha=model_cfg.lora.alpha,
+            lora_dropout=model_cfg.lora.dropout,
+            lora_target_modules=list(model_cfg.lora.target_modules),
+            sam2_image_size=model_cfg.sam2_image_size,
+        )
     raise ValueError(f"Unknown model '{name}'.")
 
 

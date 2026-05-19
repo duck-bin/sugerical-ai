@@ -93,10 +93,28 @@ def test_segmentation_module_smoke():
     trainer.fit(module, loader, loader)
 
 
-@pytest.mark.skip(reason="SAM2 + LoRA implemented in Step 4")
 def test_sam2_lora_forward_shape():
-    """(B, 3, 512, 512) input -> 6-class mask logits."""
-    raise NotImplementedError
+    """(B, 3, 512, 512) input -> (B, 6, 512, 512) logits, with gradient flow."""
+    from src.models.sam2_lora import SAM2LoRASegmenter
+
+    model = SAM2LoRASegmenter(num_classes=6, pretrained=False)
+    out = model(torch.randn(1, 3, 512, 512))
+    assert tuple(out.shape) == (1, 6, 512, 512)
+
+    out.sum().backward()
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    assert any(p.grad is not None for p in trainable)
+
+
+def test_sam2_lora_param_groups_split():
+    """param_groups yields encoder-LoRA + mask-decoder groups at the given LRs."""
+    from src.models.sam2_lora import SAM2LoRASegmenter
+
+    model = SAM2LoRASegmenter(num_classes=6, pretrained=False)
+    groups = model.param_groups(lr_encoder=1e-4, lr_decoder=1e-3)
+    assert len(groups) == 2
+    assert groups[0]["lr"] == 1e-4 and groups[1]["lr"] == 1e-3
+    assert all(len(g["params"]) > 0 for g in groups)
 
 
 @pytest.mark.skip(reason="CVS classifier implemented in Step 7")
