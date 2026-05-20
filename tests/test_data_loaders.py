@@ -153,3 +153,45 @@ def test_endoscapes_dataset_reads_frames_and_labels(tmp_path):
     assert set(item["criteria"].tolist()) <= {0.0, 1.0}
     assert 0 <= int(item["cvs_score"]) <= 3
     assert int(item["cvs_score"]) == int(item["criteria"].sum())
+
+
+def test_video_id_from_path_extracts_video_number():
+    """_video_id_from_path pulls 'videoNN' from a CholecSeg8k-style file path."""
+    from src.data.cholecseg8k import _video_id_from_path
+
+    assert _video_id_from_path(
+        "/cache/datasets/extracted/x/video01/frame_0.png") == "video01"
+    assert _video_id_from_path("/x/y/video_12/frame.png") == "video_12"
+    # No videoNN marker -> the loader treats this as an unusable result.
+    assert _video_id_from_path("/no/marker/here.png") == "/no/marker/here.png"
+
+
+def test_video_ids_from_image_paths_synthetic(tmp_path):
+    """Video-id recovery works on a synthetic HF Image dataset (no network)."""
+    from datasets import Dataset
+    from datasets import Image as HfImage
+    from PIL import Image as PILImage
+
+    from src.data.cholecseg8k import CholecSeg8kDataset
+
+    paths = []
+    for video_num in (1, 7, 12, 12):
+        directory = tmp_path / f"video{video_num:02d}"
+        directory.mkdir(exist_ok=True)
+        frame_path = directory / f"frame_{len(paths)}.png"
+        PILImage.new("RGB", (8, 8)).save(frame_path)
+        paths.append(str(frame_path))
+
+    hf_dataset = (Dataset.from_dict({"image": paths, "color_mask": paths})
+                  .cast_column("image", HfImage())
+                  .cast_column("color_mask", HfImage()))
+
+    # Bypass __init__ (which downloads from HF) and exercise the method
+    # directly on the synthetic HF dataset.
+    instance = CholecSeg8kDataset.__new__(CholecSeg8kDataset)
+    instance._hf = hf_dataset
+    instance.image_column = "image"
+
+    assert instance._video_ids_from_image_paths() == [
+        "video01", "video07", "video12", "video12",
+    ]
