@@ -94,9 +94,6 @@ NAME13_TO_IDX6: dict[str, int] = {
     "L-hook Electrocautery": 5,
 }
 
-# Alias kept for the Step 1 skeleton API.
-CHOLECSEG8K_13_TO_6: dict[str, int] = NAME13_TO_IDX6
-
 # CholecSeg8k color-mask RGB triple -> 13-class name.
 # TODO: verify against the real masks. The pixel-distribution cell in
 # notebooks/01_data_exploration.ipynb surfaces any mismatch -- correct this
