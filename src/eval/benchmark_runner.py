@@ -13,6 +13,7 @@ CLI need them) so the metric helpers stay importable without them.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import torch
@@ -32,26 +33,33 @@ def evaluate_model(model, dataloader, num_classes: int = NUM_CLASSES,
                    max_batches: int | None = None) -> dict[str, list[float]]:
     """Run a segmentation model over a dataloader, returning per-image metrics.
 
-    Returns ``{"miou": [...], "cystic_duct_dice": [...]}`` with one value per
-    test image. A value is NaN when the class is absent from both the
+    Returns a flat dict of per-image value lists: ``miou``, ``cystic_duct_dice``
+    (the headline metrics), plus ``iou_<class>`` and ``dice_<class>`` for each
+    of the 6 classes. A value is NaN when the class is absent from both the
     prediction and the target (handled downstream by :func:`bootstrap_ci`).
 
     ``max_batches`` caps the number of batches evaluated (a smoke-test knob);
     ``None`` evaluates the whole dataloader.
     """
     model = model.to(device).eval()
-    miou: list[float] = []
-    cystic_duct_dice: list[float] = []
+    metrics: dict[str, list[float]] = {"miou": [], "cystic_duct_dice": []}
+    for name in CLASS_NAMES:
+        metrics[f"iou_{name}"] = []
+        metrics[f"dice_{name}"] = []
     for index, batch in enumerate(dataloader):
         if max_batches is not None and index >= max_batches:
             break
         preds = model(batch["image"].to(device)).argmax(dim=1).cpu()
         for pred, target in zip(preds, batch["mask"]):
-            _, image_miou = iou_score(pred, target, num_classes)
+            per_class_iou, image_miou = iou_score(pred, target, num_classes)
             per_class_dice, _ = dice_score(pred, target, num_classes)
-            miou.append(float(image_miou))
-            cystic_duct_dice.append(float(per_class_dice[CYSTIC_DUCT_INDEX]))
-    return {"miou": miou, "cystic_duct_dice": cystic_duct_dice}
+            metrics["miou"].append(float(image_miou))
+            metrics["cystic_duct_dice"].append(
+                float(per_class_dice[CYSTIC_DUCT_INDEX]))
+            for class_index, name in enumerate(CLASS_NAMES):
+                metrics[f"iou_{name}"].append(float(per_class_iou[class_index]))
+                metrics[f"dice_{name}"].append(float(per_class_dice[class_index]))
+    return metrics
 
 
 def summarize(per_image_metrics: dict, seed: int = 42) -> dict:
@@ -68,15 +76,48 @@ def _format_cell(ci: tuple) -> str:
     return f"{mean:.3f} ({lo:.3f}-{hi:.3f})"
 
 
-def format_table(results: dict) -> str:
-    """Render the markdown comparison table from ``{label: summary}``."""
+def _format_scalar(value) -> str:
+    """Format a single number as ``0.123``; ``TBD`` for ``None`` or NaN."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "TBD"
+    return "TBD" if number != number else f"{number:.3f}"
+
+
+def format_table(results: dict, cvs_map: dict | None = None) -> str:
+    """Render the headline comparison table from ``{label: summary}``.
+
+    ``cvs_map`` optionally maps a model label to its CVS mAP. The CVS classifier
+    is trained on a single segmentation model, so usually only that model's row
+    carries a value and the rest stay ``TBD``.
+    """
+    cvs_map = cvs_map or {}
     lines = ["| Method | mIoU | Cystic Duct Dice | CVS mAP |",
              "|---|---|---|---|"]
     for label, summary in results.items():
         lines.append(
             f"| {label} | {_format_cell(summary['miou'])} "
-            f"| {_format_cell(summary['cystic_duct_dice'])} | TBD |"
+            f"| {_format_cell(summary['cystic_duct_dice'])} "
+            f"| {_format_scalar(cvs_map.get(label))} |"
         )
+    return "\n".join(lines) + "\n"
+
+
+def format_per_class_table(results: dict, kind: str) -> str:
+    """Render a per-class breakdown table; ``kind`` is ``"iou"`` or ``"dice"``.
+
+    Rows are the 6 anatomical classes, columns the evaluated models. A class
+    absent from the test split (e.g. ``cystic_artery`` in CholecSeg8k) renders
+    as ``TBD``.
+    """
+    labels = list(results)
+    lines = ["| Class | " + " | ".join(labels) + " |",
+             "|" + "---|" * (len(labels) + 1)]
+    for name in CLASS_NAMES:
+        cells = [_format_cell(results[label].get(f"{kind}_{name}", _NAN_CI))
+                 for label in labels]
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
 
@@ -103,6 +144,26 @@ def _resolve_device(requested: str) -> str:
     if requested == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     return requested
+
+
+def _load_cvs_map(cfg) -> dict:
+    """Map each model label to its CVS mAP, read from the CVS metrics JSON.
+
+    ``train_cvs`` writes ``results/cvs_metrics.json`` recording which
+    segmentation model fed the classifier; only that model's row gets a value.
+    Returns ``{}`` when the file is absent (CVS not trained yet).
+    """
+    path = Path(str(cfg.get("cvs_metrics_path", "results/cvs_metrics.json")))
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (ValueError, OSError):
+        return {}
+    seg_model = data.get("seg_model")
+    test_map = data.get("test_map")
+    return {entry.label: test_map
+            for entry in cfg.models if entry.model_config == seg_model}
 
 
 def run_benchmark(cfg) -> None:
@@ -148,7 +209,9 @@ def run_benchmark(cfg) -> None:
             evaluate_model(model, loader, NUM_CLASSES, device,
                            max_batches=max_batches), seed=cfg.seed)
 
-    table = format_table(results)
+    table = format_table(results, _load_cvs_map(cfg))
+    table += "\n## Per-class IoU\n\n" + format_per_class_table(results, "iou")
+    table += "\n## Per-class Dice\n\n" + format_per_class_table(results, "dice")
     output_path = Path(cfg.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(table)
