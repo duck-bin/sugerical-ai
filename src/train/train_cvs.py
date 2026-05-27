@@ -9,6 +9,7 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -32,25 +33,34 @@ from src.train.train_segmentation import (
 from src.utils.seeds import seed_everything
 
 
-def _report_cvs_results(test_results: list[dict]) -> None:
+def _report_cvs_results(test_results: list[dict], seg_model_name: str) -> None:
     """Surface the CVS test metrics so they're easy to spot after a long run.
 
-    Prints a clearly delimited summary block and writes the same numbers to
-    ``results/cvs_metrics.md`` (mirroring how the benchmark runner persists its
-    table), so the values survive a Colab scroll-back or disconnect.
+    Prints a clearly delimited summary block and writes the numbers to
+    ``results/cvs_metrics.md`` (human-readable) and ``results/cvs_metrics.json``
+    (machine-readable). The benchmark runner reads the JSON -- keyed by the
+    ``seg_model_name`` that fed the classifier -- to fill that model's CVS mAP
+    cell. Persisting also keeps the values across a Colab scroll-back/disconnect.
     """
     metrics = test_results[0] if test_results else {}
+    test_map = metrics.get("test_map")
+    test_qwk = metrics.get("test_qwk")
+    test_loss = metrics.get("test_loss")
     rows = [
-        ("CVS mAP (mean AP over 3 criteria)", metrics.get("test_map")),
-        ("CVS QWK (score 0-3 agreement)", metrics.get("test_qwk")),
-        ("test_loss", metrics.get("test_loss")),
+        ("CVS mAP (mean AP over 3 criteria)", test_map),
+        ("CVS QWK (score 0-3 agreement)", test_qwk),
+        ("test_loss", test_loss),
     ]
 
-    def fmt(value) -> str:
+    def num(value):
         try:
-            return f"{float(value):.4f}"
+            return float(value)
         except (TypeError, ValueError):
-            return "n/a"
+            return None
+
+    def fmt(value) -> str:
+        number = num(value)
+        return "n/a" if number is None else f"{number:.4f}"
 
     bar = "=" * 60
     print(f"\n{bar}\n  CVS classifier -- test results\n{bar}")
@@ -58,12 +68,19 @@ def _report_cvs_results(test_results: list[dict]) -> None:
         print(f"  {label:34s}: {fmt(value)}")
     print(bar)
 
-    output_path = Path("results/cvs_metrics.md")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    results_dir = Path("results")
+    results_dir.mkdir(parents=True, exist_ok=True)
     table = "# CVS classifier -- test results\n\n| Metric | Value |\n|---|---|\n"
     table += "".join(f"| {label} | {fmt(value)} |\n" for label, value in rows)
-    output_path.write_text(table)
-    print(f"  saved -> {output_path}\n")
+    (results_dir / "cvs_metrics.md").write_text(table)
+    (results_dir / "cvs_metrics.json").write_text(json.dumps({
+        "seg_model": seg_model_name,
+        "test_map": num(test_map),
+        "test_qwk": num(test_qwk),
+        "test_loss": num(test_loss),
+    }, indent=2))
+    print(f"  saved -> {results_dir / 'cvs_metrics.md'}, "
+          f"{results_dir / 'cvs_metrics.json'}\n")
 
 
 def _pos_weight(dataset: Endoscapes2023Dataset) -> torch.Tensor:
@@ -144,7 +161,7 @@ def main(cfg: DictConfig) -> None:
     trainer.fit(module, train_loader, val_loader,
                 ckpt_path=last_ckpt if os.path.exists(last_ckpt) else None)
     test_results = trainer.test(module, test_loader, ckpt_path="best")
-    _report_cvs_results(test_results)
+    _report_cvs_results(test_results, seg_cfg.name)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 
 from src.eval.benchmark_runner import (
     evaluate_model,
+    format_per_class_table,
     format_table,
     load_segmentation_checkpoint,
     summarize,
@@ -38,6 +39,37 @@ def test_evaluate_model_perfect_prediction():
     assert len(metrics["cystic_duct_dice"]) == 5
     assert all(m == pytest.approx(1.0) for m in metrics["miou"])
     assert all(d == pytest.approx(1.0) for d in metrics["cystic_duct_dice"])
+    # Per-class lists are present for every class and equal the headline value
+    # for the cystic_duct column.
+    assert len(metrics["iou_cystic_duct"]) == 5
+    assert metrics["dice_cystic_duct"] == metrics["cystic_duct_dice"]
+
+
+def test_format_table_fills_cvs_map_for_matching_label():
+    """A label present in cvs_map renders its mAP; others stay TBD."""
+    results = {
+        "SAM2": {"miou": (0.7, 0.65, 0.75), "cystic_duct_dice": (0.4, 0.3, 0.5)},
+        "U-Net": {"miou": (0.6, 0.55, 0.65), "cystic_duct_dice": (0.3, 0.2, 0.4)},
+    }
+    table = format_table(results, cvs_map={"SAM2": 0.612})
+
+    assert "| SAM2 | 0.700 (0.650-0.750) | 0.400 (0.300-0.500) | 0.612 |" in table
+    assert "| U-Net | 0.600 (0.550-0.650) | 0.300 (0.200-0.400) | TBD |" in table
+
+
+def test_format_per_class_table_renders_classes_and_tbd():
+    """Per-class table lists each class; a missing/NaN class renders 'TBD'."""
+    results = {
+        "U-Net": {"iou_liver": (0.8, 0.7, 0.9),
+                  "iou_cystic_artery": (float("nan"),) * 3},
+    }
+    table = format_per_class_table(results, "iou")
+
+    assert table.startswith("| Class | U-Net |")
+    assert "| liver | 0.800 (0.700-0.900) |" in table
+    assert "| cystic_artery | TBD |" in table
+    # A class with no entry at all also falls back to TBD.
+    assert "| background | TBD |" in table
 
 
 def test_summarize_returns_ci_triples():
