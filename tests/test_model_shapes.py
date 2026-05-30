@@ -186,6 +186,50 @@ def test_temporal_sam2_default_temporal_lr_is_decoder_lr():
     assert groups[2]["lr"] == 1e-3
 
 
+def test_temporal_segmentation_module_smoke():
+    """End-to-end Lightning train + val step on a synthetic clip (no download).
+
+    The temporal analogue of ``test_segmentation_module_smoke``: the synthetic
+    dataset yields a (T, 3, H, W) clip per item plus the target frame's (H, W)
+    mask -- exactly the layout ``CholecSeg8kWindowDataset`` produces. Runs on
+    CPU, no network, no checkpoint. Asserts the forward output is
+    (B, num_classes, H, W) and the focal+Dice loss is finite, then runs one
+    fast_dev_run train + val step to confirm the pipeline connects end-to-end.
+    """
+    import pytorch_lightning as pl
+    from torch.utils.data import DataLoader, Dataset
+
+    from src.models.temporal import TemporalSAM2LoRASegmenter
+    from src.train.lightning_modules import SegmentationModule
+
+    window = 3
+
+    class _SyntheticClips(Dataset):
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            return {"image": torch.randn(window, 3, 64, 64),
+                    "mask": torch.randint(0, 6, (64, 64))}
+
+    model = TemporalSAM2LoRASegmenter(num_classes=6, pretrained=False,
+                                      window=window)
+    module = SegmentationModule(model, num_classes=6, max_epochs=1,
+                                warmup_epochs=0)
+
+    loader = DataLoader(_SyntheticClips(), batch_size=1)
+    batch = next(iter(loader))
+    logits = model(batch["image"])
+    assert tuple(logits.shape) == (1, 6, 64, 64)
+    loss = (module.focal_weight * module.focal(logits, batch["mask"])
+            + module.dice_weight * module.dice(logits, batch["mask"]))
+    assert torch.isfinite(loss)
+
+    trainer = pl.Trainer(fast_dev_run=True, accelerator="cpu", logger=False,
+                         enable_checkpointing=False)
+    trainer.fit(module, loader, loader)
+
+
 def test_cvs_classifier_forward_shape():
     """(B, 9, 224, 224) input -> (B, 3) criterion logits, with gradient flow."""
     from src.models.cvs_classifier import CVSClassifier
